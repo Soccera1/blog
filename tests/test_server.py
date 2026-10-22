@@ -162,6 +162,69 @@ class BlogTests(unittest.TestCase):
         self.assertNotIn(b'Second version', self.get()[2])
         self.assertEqual(self.get('/posts/live')[0], 404)
 
+    def test_cache_detects_edits_with_same_size_and_mtime(self):
+        path = self.blog / 'newer.md'
+        self.assertEqual(self.get('/posts/newer')[0], 200)
+        self.assertIn(b'Newer post', self.get()[2])
+        original = path.read_bytes()
+        stat = path.stat()
+        updated = original.replace(b'Newer post', b'Other post')
+        updated = updated.replace(b'2026-10-22', b'2023-10-22')
+        updated = updated.replace(b'A short summary', b'A fresh summary')
+        updated = updated.replace(b'A. Writer', b'B. Writer')
+        updated = updated.replace(b'C, notes', b'D, notes')
+        updated = updated.replace(b'Body only on the post.', b'Edit only on the post.')
+        self.assertEqual(len(original), len(updated))
+        path.write_bytes(updated)
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertEqual(path.stat().st_mtime_ns, stat.st_mtime_ns)
+        for route in ('/', '/posts/newer'):
+            status, _, body = self.get(route)
+            self.assertEqual(status, 200)
+            for text in (b'Other post', b'2023-10-22', b'A fresh summary', b'B. Writer', b'D, notes'):
+                self.assertIn(text, body)
+            self.assertNotIn(b'Newer post', body)
+        home = self.get()[2]
+        self.assertLess(home.index(b'Older post'), home.index(b'Other post'))
+        self.assertIn(b'Edit only on the post.', self.get('/posts/newer')[2])
+
+    def test_cache_revalidates_drafts_invalid_files_and_replacements(self):
+        def visible():
+            self.assertEqual(self.get('/posts/changing')[0], 200)
+            self.assertIn(b'Changing post', self.get()[2])
+
+        def hidden():
+            self.assertEqual(self.get('/posts/changing')[0], 404)
+            self.assertNotIn(b'Changing post', self.get()[2])
+
+        self.post('changing', 'title: Changing post', 'Original body')
+        visible()
+        self.post('changing', 'title: Changing post\ndraft: true', 'Hidden body')
+        hidden()
+        self.post('changing', 'title: Changing post', 'Published body')
+        visible()
+        path = self.blog / 'changing.md'
+        path.write_text('Invalid header')
+        hidden()
+        self.post('changing', 'title: Changing post', 'Restored body')
+        visible()
+        path.unlink()
+        path.symlink_to(self.blog / 'newer.md')
+        hidden()
+        path.unlink()
+        self.post('changing', 'title: Changing post', 'Replacement body')
+        visible()
+        self.assertIn(b'Replacement body', self.get('/posts/changing')[2])
+        path.rename(self.blog / 'renamed.md')
+        self.assertEqual(self.get('/posts/changing')[0], 404)
+        self.assertEqual(self.get('/posts/renamed')[0], 200)
+        home = self.get()[2]
+        self.assertIn(b'href="/posts/renamed"', home)
+        self.assertNotIn(b'href="/posts/changing"', home)
+        (self.blog / 'renamed.md').unlink()
+        self.assertEqual(self.get('/posts/renamed')[0], 404)
+        self.assertNotIn(b'Changing post', self.get()[2])
+
     def test_embedded_css_without_runtime_file(self):
         self.assertFalse((self.root / 'style.css').exists())
         status, headers, css = self.get('/style.css')
@@ -315,6 +378,81 @@ class BlogTests(unittest.TestCase):
             executable.chmod(0o755)
         self.start_server(env={**os.environ, 'PATH': str(path)})
         return executable
+
+    def counting_pandoc(self):
+        self.fake_pandoc(
+            'import html, sys\nfrom pathlib import Path\n'
+            'counter = Path("render-count")\n'
+            'count = int(counter.read_text()) if counter.exists() else 0\n'
+            'counter.write_text(str(count + 1))\n'
+            'if Path("fail-render").exists(): raise SystemExit(7)\n'
+            'print("<p>" + html.escape(sys.stdin.read()) + "</p>")\n')
+
+    def render_count(self):
+        path = self.root / 'render-count'
+        return int(path.read_text()) if path.exists() else 0
+
+    @unittest.skipUnless(USE_PANDOC, 'Pandoc build only')
+    def test_cache_reuses_html_for_get_head_and_normalized_urls(self):
+        self.counting_pandoc()
+        first = self.get('/posts/newer')
+        self.assertEqual(first[0], 200)
+        self.assertEqual(self.render_count(), 1)
+        for route in ('/posts/newer', '/posts/%6eewer', '/posts/newer?x=1'):
+            self.assertEqual(self.get(route)[2], first[2])
+        self.assertEqual(self.get('/posts/newer', 'HEAD')[2], b'')
+        self.assertEqual(self.render_count(), 1)
+        self.assertEqual(self.get('/posts/older')[0], 200)
+        self.assertEqual(self.render_count(), 2)
+        self.assertEqual(self.get('/posts/newer')[2], first[2])
+        self.assertEqual(self.render_count(), 2)
+        path = self.blog / 'newer.md'
+        stat = path.stat()
+        path.write_bytes(path.read_bytes().replace(b'Newer post', b'Other post'))
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertIn(b'Other post', self.get('/posts/newer')[2])
+        self.assertEqual(self.render_count(), 3)
+        self.assertIn(b'Other post', self.get('/posts/newer')[2])
+        self.assertEqual(self.render_count(), 3)
+
+    @unittest.skipUnless(USE_PANDOC, 'Pandoc build only')
+    def test_cache_never_falls_back_to_stale_html_after_render_failure(self):
+        self.counting_pandoc()
+        original = self.get('/posts/newer')[2]
+        self.assertEqual(self.render_count(), 1)
+        failure = self.root / 'fail-render'
+        failure.touch()
+        self.assertEqual(self.get('/posts/newer')[2], original)
+        self.assertEqual(self.render_count(), 1)
+        path = self.blog / 'newer.md'
+        path.write_bytes(path.read_bytes().replace(b'Body only', b'Edit only'))
+        for _ in range(2):
+            status, _, body = self.get('/posts/newer')
+            self.assertEqual(status, 500)
+            self.assertNotIn(b'Body only on the post.', body)
+        self.assertEqual(self.render_count(), 3)
+        failure.unlink()
+        self.assertIn(b'Edit only on the post.', self.get('/posts/newer')[2])
+        self.assertEqual(self.render_count(), 4)
+        self.assertEqual(self.get('/posts/newer')[0], 200)
+        self.assertEqual(self.render_count(), 4)
+
+    @unittest.skipUnless(USE_PANDOC, 'Pandoc build only')
+    def test_cache_evicts_least_recently_used_pages(self):
+        self.counting_pandoc()
+        self.assertEqual(self.get('/posts/newer')[0], 200)
+        self.assertEqual(self.get('/posts/older')[0], 200)
+        # Keep newer hot while exceeding the documented 128-page limit.
+        for i in range(127):
+            slug = f'cache-{i}'
+            self.post(slug, f'title: Cache post {i}', f'Body {i}')
+            self.assertEqual(self.get('/posts/' + slug)[0], 200)
+            self.assertEqual(self.get('/posts/newer')[0], 200)
+        self.assertEqual(self.render_count(), 129)
+        self.assertEqual(self.get('/posts/cache-126')[0], 200)
+        self.assertEqual(self.render_count(), 129)
+        self.assertEqual(self.get('/posts/older')[0], 200)
+        self.assertEqual(self.render_count(), 130)
 
     @unittest.skipUnless(USE_PANDOC, 'Pandoc build only')
     def test_pandoc_missing_executable(self):

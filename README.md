@@ -7,12 +7,13 @@ uses plain HTTP and listens only on `127.0.0.1`, ready for an nginx proxy.
 
 ## Build and run
 
-Requires a POSIX system (such as Linux), a C compiler, and Make. The default
-renderer also needs pkg-config and the MD4C HTML development library.
+Requires a POSIX system (such as Linux), a C compiler, Make, pkg-config, and
+the xxHash development library. The default renderer also needs the MD4C HTML
+development library.
 On Debian/Ubuntu:
 
 ```sh
-sudo apt install build-essential pkg-config libmd4c-html0-dev
+sudo apt install build-essential pkg-config libxxhash-dev libmd4c-html0-dev
 make
 ./blog-server
 ```
@@ -29,7 +30,8 @@ an error if that directory is missing. Stop with Ctrl+C or SIGTERM.
 `style.css` is the readable CSS source. `make` converts it into an embedded C
 array using a tiny C build helper. After changing CSS, rebuild and restart the
 server. The deployed executable needs no separate stylesheet or template files;
-MD4C remains a shared library dependency with the default build.
+xxHash is a shared library dependency of both builds; MD4C is also needed at
+runtime with the default build. On Gentoo, xxHash is `dev-libs/xxhash`.
 
 ### Pandoc renderer (compile-time option)
 
@@ -40,8 +42,8 @@ make USE_PANDOC=1
 ./blog-server
 ```
 
-This build needs no MD4C headers, libraries, or pkg-config. It runs the `pandoc`
-executable from `PATH` for each post request. Install Pandoc **3.11 or newer**
+This build needs no MD4C headers or libraries. It runs the `pandoc`
+executable from `PATH` when a post needs rendering. Install Pandoc **3.11 or newer**
 on the server and make sure the OpenRC service account can run it. For example,
 on Gentoo:
 
@@ -60,12 +62,40 @@ returns an HTML fragment inside the existing page layout. Each conversion has
 a ten-second deadline and the same HTML output limit. A missing executable or
 failed conversion logs an error and returns HTTP 500; the homepage remains
 available. The server needs a writable temporary directory for conversion input.
-Pandoc starts once per post request, so it adds overhead compared with MD4C.
+Pandoc starts on a cache miss, so the first request for a post or an edited
+version adds overhead compared with MD4C. Unchanged posts reuse cached HTML.
 
 Switch back with `make USE_PANDOC=0` (or plain `make`). Switching renderers
 automatically rebuilds the executable; `make clean` is unnecessary. Reinstall
 the executable and restart the service after switching. `./blog-server --help`
 shows which renderer was compiled in.
+
+## Render cache
+
+The server caches rendered post pages and the homepage in memory. On every post
+request, including HEAD, it reads the current file and computes its XXH3 64-bit
+hash over the complete source, including `BLOG INFO`. A matching hash, length,
+and exact byte comparison reuse the cached HTML without running the renderer.
+Checking contents detects edits even when a file's size and modification time
+stay the same.
+
+The homepage rescans `blog/` and hashes the sources on every request. Its cache
+uses the sorted post inventory, content hashes, and displayed metadata, so new,
+renamed, edited, deleted, invalid, or draft posts are reflected immediately.
+Drafts and missing or invalid files return 404 even if they were cached earlier.
+A failed conversion returns an error rather than the old page; failures are
+retried on the next request.
+
+The cache holds up to 128 pages and 64 MiB total, including saved source bytes,
+HTML, and entry structures. It evicts the least recently used entries when
+either limit is reached. Allocation failures leave pages available without
+caching, and the cache starts empty after a restart. Assets are read directly;
+CSS remains embedded in the executable.
+
+HTTP responses keep `Cache-Control: no-cache`, and the nginx configuration
+keeps proxy caching disabled, so requests reach the server for content validation.
+Publish edits by renaming a complete temporary file into place, as described
+below. The server rejects files detected changing during a read.
 
 ## Write a post
 
@@ -180,9 +210,9 @@ The `blog` account needs permission to read posts and traverse their directories
 Edit `/etc/conf.d/blog-server` to change the executable, working directory,
 account, port, or log directory. Restart with `sudo rc-service blog-server restart`
 after changing those settings or replacing the executable. Post edits still
-take effect immediately. Ensure the deployment machine has the MD4C runtime
-libraries for the default build, or `pandoc` in the service's `PATH` for the
-Pandoc build.
+take effect immediately. Ensure the deployment machine has the xxHash runtime
+library, plus MD4C for the default build or `pandoc` in the service's `PATH`
+for the Pandoc build.
 
 ## nginx
 
@@ -228,5 +258,7 @@ make test USE_PANDOC=1
 Integration tests require Python 3's standard library. They start the compiled
 server with temporary posts, exercise real HTTP requests, and check metadata,
 Markdown, live updates, embedded CSS, assets, HTTP errors, drafts, and path
-traversal handling. The Pandoc build also checks extended formatting, large
-conversions, subprocess failures, output limits, and conversion timeouts.
+traversal handling. Cache tests check invalidation with unchanged timestamps,
+metadata edits, draft transitions, deletion, and replacement. The Pandoc build
+also checks cache hits with a counted renderer, eviction, extended formatting,
+large conversions, subprocess failures, output limits, and conversion timeouts.

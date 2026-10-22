@@ -26,6 +26,7 @@ extern char **environ;
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <xxhash.h>
 
 #include ".build/style.inc"
 
@@ -35,6 +36,8 @@ extern char **environ;
 #define MAX_INFO_BYTES (16U * 1024U)
 #define MAX_POSTS 2048U
 #define REQUEST_BYTES 8192U
+#define CACHE_MAX_BYTES (64U * 1024U * 1024U)
+#define CACHE_MAX_ENTRIES 128U
 
 typedef struct {
     char *data;
@@ -47,8 +50,20 @@ typedef struct {
     char date[11];
     bool draft;
     char *document, *body;
+    size_t document_length;
+    XXH64_hash_t source_hash;
 } Post;
 
+typedef struct CacheEntry {
+    struct CacheEntry *prev, *next;
+    char key[256];
+    XXH64_hash_t hash;
+    char *source, *html;
+    size_t source_length, html_length, charge;
+} CacheEntry;
+
+static CacheEntry *cache_head, *cache_tail;
+static size_t cache_bytes, cache_count;
 static volatile sig_atomic_t stopping;
 
 static void stop_server(int signo)
@@ -102,6 +117,103 @@ static void escape_html(Buffer *b, const char *s)
     }
 }
 
+static CacheEntry *cache_find(const char *key)
+{
+    for (CacheEntry *e = cache_head; e; e = e->next)
+        if (strcmp(e->key, key) == 0)
+            return e;
+    return NULL;
+}
+
+static void cache_unlink(CacheEntry *e)
+{
+    if (e->prev)
+        e->prev->next = e->next;
+    else
+        cache_head = e->next;
+    if (e->next)
+        e->next->prev = e->prev;
+    else
+        cache_tail = e->prev;
+}
+
+static void cache_remove(CacheEntry *e)
+{
+    cache_unlink(e);
+    cache_bytes -= e->charge;
+    cache_count--;
+    free(e);
+}
+
+static void cache_forget(const char *key)
+{
+    CacheEntry *e = cache_find(key);
+    if (e)
+        cache_remove(e);
+}
+
+static void cache_prepend(CacheEntry *e)
+{
+    e->prev = NULL;
+    e->next = cache_head;
+    if (cache_head)
+        cache_head->prev = e;
+    else
+        cache_tail = e;
+    cache_head = e;
+}
+
+static const CacheEntry *cache_lookup(const char *key, XXH64_hash_t hash,
+                                     const char *source, size_t length)
+{
+    CacheEntry *e = cache_find(key);
+    if (!e)
+        return NULL;
+    /* The exact comparison also prevents a hash collision from serving old HTML. */
+    if (e->hash != hash || e->source_length != length ||
+        (length && memcmp(e->source, source, length) != 0)) {
+        cache_remove(e);
+        return NULL;
+    }
+    cache_unlink(e);
+    cache_prepend(e);
+    return e;
+}
+
+static void cache_store(const char *key, XXH64_hash_t hash, const char *source,
+                        size_t length, const Buffer *html)
+{
+    size_t charge = sizeof(CacheEntry) + length + html->len + 2;
+    if (html->failed || charge > CACHE_MAX_BYTES || strlen(key) >= 256)
+        return;
+    CacheEntry *e = malloc(charge);
+    if (!e)
+        return; /* A cache allocation failure must not prevent serving the page. */
+    cache_forget(key);
+    while (cache_count >= CACHE_MAX_ENTRIES || cache_bytes > CACHE_MAX_BYTES - charge)
+        cache_remove(cache_tail);
+    memcpy(e->key, key, strlen(key) + 1);
+    e->hash = hash;
+    e->source_length = length;
+    e->html_length = html->len;
+    e->charge = charge;
+    e->source = (char *)(e + 1);
+    e->html = e->source + length + 1;
+    if (length)
+        memcpy(e->source, source, length);
+    e->source[length] = '\0';
+    memcpy(e->html, html->data, html->len + 1);
+    cache_prepend(e);
+    cache_count++;
+    cache_bytes += charge;
+}
+
+static void cache_clear(void)
+{
+    while (cache_tail)
+        cache_remove(cache_tail);
+}
+
 static bool slug_char(unsigned char c)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
@@ -140,6 +252,20 @@ static char *read_file(int fd, size_t limit, size_t *length)
             return NULL;
         }
         used += (size_t)n;
+    }
+    /* Reject files that grow or change while being read, instead of hashing
+     * only an old prefix or caching a partially updated document. */
+    char extra;
+    ssize_t tail;
+    do {
+        tail = read(fd, &extra, 1);
+    } while (tail < 0 && errno == EINTR);
+    struct stat after;
+    if (tail != 0 || fstat(fd, &after) < 0 || after.st_size != st.st_size ||
+        after.st_mtim.tv_sec != st.st_mtim.tv_sec || after.st_mtim.tv_nsec != st.st_mtim.tv_nsec ||
+        after.st_ctim.tv_sec != st.st_ctim.tv_sec || after.st_ctim.tv_nsec != st.st_ctim.tv_nsec) {
+        free(data);
+        return NULL;
     }
     data[used] = '\0';
     *length = used;
@@ -201,9 +327,13 @@ static bool parse_post(Post *p, size_t length)
     if (!end || (size_t)(end - header) > MAX_INFO_BYTES)
         return false;
     p->body = end + 2;
-    *end = '\0';
+    /* Keep the original bytes intact for hashing and cache validation. */
+    size_t info_length = (size_t)(end - header);
+    char info[MAX_INFO_BYTES + 1];
+    memcpy(info, header, info_length);
+    info[info_length] = '\0';
     char *state;
-    for (char *line = strtok_r(header, "\n", &state); line;
+    for (char *line = strtok_r(info, "\n", &state); line;
          line = strtok_r(NULL, "\n", &state)) {
         line = trim(line);
         if (!*line)
@@ -250,6 +380,8 @@ static bool load_post(int blogfd, const char *slug, Post *p)
     close(fd);
     if (!p->document)
         return false;
+    p->document_length = length;
+    p->source_hash = XXH3_64bits(p->document, length);
     if (!parse_post(p, length)) {
         fprintf(stderr, "Skipping %s: invalid BLOG INFO header or content\n", filename);
         free(p->document);
@@ -364,6 +496,32 @@ static bool render_home(int blogfd, Buffer *b)
         return false;
     }
     qsort(posts, count, sizeof(*posts), compare_posts);
+    /* Rescan and hash the sources on every homepage request. Sorting makes
+     * the manifest independent of directory enumeration order. */
+    Buffer manifest = {0};
+    append(&manifest, "posts\n");
+    for (size_t i = 0; i < count; i++) {
+        const Post *p = &posts[i];
+        XXH64_canonical_t hash;
+        XXH64_canonicalFromHash(&hash, p->source_hash);
+        append_bytes(&manifest, (const char *)hash.digest, sizeof(hash.digest));
+        const char *fields[] = {p->slug, p->title, p->date, p->description, p->author, p->tags};
+        for (size_t j = 0; j < sizeof(fields) / sizeof(fields[0]); j++)
+            append_bytes(&manifest, fields[j], strlen(fields[j]) + 1);
+    }
+    if (manifest.failed) {
+        free(manifest.data);
+        free(posts);
+        return false;
+    }
+    XXH64_hash_t hash = XXH3_64bits(manifest.data, manifest.len);
+    const CacheEntry *cached = cache_lookup("/", hash, manifest.data, manifest.len);
+    if (cached) {
+        append_bytes(b, cached->html, cached->html_length);
+        free(manifest.data);
+        free(posts);
+        return !b->failed;
+    }
     page_start(b, "Posts", "Blog posts, newest first.");
     append(b, "<h1>Posts</h1>");
     if (!count)
@@ -386,6 +544,8 @@ static bool render_home(int blogfd, Buffer *b)
         append(b, "</article>");
     }
     page_end(b);
+    cache_store("/", hash, manifest.data, manifest.len, b);
+    free(manifest.data);
     free(posts);
     return !b->failed;
 }
@@ -775,15 +935,27 @@ static void handle_client(int fd, int blogfd)
     } else if (strncmp(path, "/posts/", 7) == 0) {
         Post p;
         if (!load_post(blogfd, path + 7, &p)) {
+            cache_forget(path + 7);
             error_response(fd, 404, "Not Found", head);
             return;
         }
         if (p.draft) {
+            cache_forget(p.slug);
             free(p.document);
             error_response(fd, 404, "Not Found", head);
             return;
         }
+        const CacheEntry *cached = cache_lookup(p.slug, p.source_hash,
+                                                p.document, p.document_length);
+        if (cached) {
+            respond(fd, 200, "OK", "text/html; charset=utf-8",
+                    cached->html, cached->html_length, head);
+            free(p.document);
+            return;
+        }
         ok = render_post(&b, &p);
+        if (ok)
+            cache_store(p.slug, p.source_hash, p.document, p.document_length, &b);
         free(p.document);
     } else {
         error_response(fd, 404, "Not Found", head);
@@ -875,5 +1047,6 @@ int main(int argc, char **argv)
     }
     close(server);
     close(blogfd);
+    cache_clear();
     return result;
 }
