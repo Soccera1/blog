@@ -27,9 +27,10 @@ Visit **http://127.0.0.1:8080**. To choose another port:
 Run the executable from the directory containing your `blog/` folder. It reports
 an error if that directory is missing. Stop with Ctrl+C or SIGTERM.
 
-`style.css` is the readable CSS source. `make` converts it into an embedded C
-array using a tiny C build helper. After changing CSS, rebuild and restart the
-server. The deployed executable needs no separate stylesheet or template files;
+`style.css` and `copy.js` are the readable CSS and JavaScript sources. `make`
+converts them into embedded C arrays using a tiny C build helper. After changing
+either file, rebuild and restart the server. The deployed executable needs no
+separate stylesheet, script, or template files;
 xxHash is a shared library dependency of both builds; MD4C is also needed at
 runtime with the default build. On Gentoo, xxHash is `dev-libs/xxhash`.
 
@@ -90,7 +91,7 @@ The cache holds up to 128 pages and 64 MiB total, including saved source bytes,
 HTML, and entry structures. It evicts the least recently used entries when
 either limit is reached. Allocation failures leave pages available without
 caching, and the cache starts empty after a restart. Assets are read directly;
-CSS remains embedded in the executable.
+CSS and the copy-button script remain embedded in the executable.
 
 HTTP responses keep `Cache-Control: no-cache`, and the nginx configuration
 keeps proxy caching disabled, so requests reach the server for content validation.
@@ -164,8 +165,9 @@ and paths escaping this folder are rejected. Everything else in `blog/assets/`
 is public. Post sources and files elsewhere in the working directory are not
 served. Remote image URLs work too.
 
-Metadata is HTML escaped. Raw HTML in Markdown is displayed as text; scripts
-are blocked by a Content Security Policy. The default MD4C renderer uses
+Metadata is HTML escaped. Raw HTML in Markdown is displayed as text. A Content
+Security Policy blocks inline scripts while allowing the site's embedded
+copy-button script. The default MD4C renderer uses
 CommonMark syntax and GitHub-style extensions. The optional Pandoc renderer
 uses its extended Markdown dialect, with raw HTML, raw TeX, and raw attributes
 disabled and Pandoc's sandbox enabled.
@@ -176,6 +178,13 @@ Edit `style.css` for the layout, colours, typography, responsive styling, and
 automatic dark mode. The homepage lists posts directly; article pages have an
 "All posts" link above the title. Page markup is in `page_start()`,
 `render_home()`, and `render_post()` in `main.c`.
+
+Code blocks get a copy icon in their right padding with JavaScript enabled,
+including Pandoc's highlighted blocks. It copies plain code text with indentation
+and line breaks preserved, and briefly changes to a checkmark on success.
+The button has a tooltip and a screen-reader label. If copying is blocked, the code is
+selected for manual copying. The button uses the browser clipboard API, with
+a selection-based fallback. Its source is `copy.js`, served at `/copy.js`.
 
 ## OpenRC
 

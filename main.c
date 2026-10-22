@@ -29,6 +29,7 @@ extern char **environ;
 #include <xxhash.h>
 
 #include ".build/style.inc"
+#include ".build/copy.inc"
 
 #define MAX_POST_BYTES (4U * 1024U * 1024U)
 #define MAX_ASSET_BYTES (16U * 1024U * 1024U)
@@ -708,7 +709,7 @@ static bool render_post(Buffer *b, const Post *p)
     post_tags(b, p);
     append(b, "</header><div class=\"prose\">");
     bool ok = render_markdown(b, p->body);
-    append(b, "</div></article>");
+    append(b, "</div></article><script src=\"/copy.js\" defer></script>");
     page_end(b);
     return ok && !b->failed;
 }
@@ -740,7 +741,7 @@ static void respond(int fd, int status, const char *reason, const char *type,
         "HTTP/1.1 %d %s\r\nDate: %s\r\nContent-Type: %s\r\n"
         "Content-Length: %zu\r\nConnection: close\r\nCache-Control: no-cache\r\n"
         "X-Content-Type-Options: nosniff\r\nReferrer-Policy: strict-origin-when-cross-origin\r\n"
-        "Content-Security-Policy: default-src 'none'; style-src 'self'; "
+        "Content-Security-Policy: default-src 'none'; style-src 'self'; script-src 'self'; "
         "img-src 'self' https: http: data:; base-uri 'none'; form-action 'none'; "
         "frame-ancestors 'none'\r\n%s\r\n",
         status, reason, date, type, length, status == 405 ? "Allow: GET, HEAD\r\n" : "");
@@ -913,6 +914,10 @@ static void handle_client(int fd, int blogfd)
     }
     if (strcmp(path, "/style.css") == 0) {
         respond(fd, 200, "OK", "text/css; charset=utf-8", stylesheet, sizeof(stylesheet)-1, head);
+        return;
+    }
+    if (strcmp(path, "/copy.js") == 0) {
+        respond(fd, 200, "OK", "text/javascript; charset=utf-8", copy_script, sizeof(copy_script)-1, head);
         return;
     }
     if (strncmp(path, "/assets/", 8) == 0) {
