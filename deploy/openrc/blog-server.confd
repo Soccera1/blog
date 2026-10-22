@@ -1,0 +1,11 @@
+# Install as /etc/conf.d/blog-server. Restart the service after changes.
+blog_binary="/usr/local/bin/blog-server"
+
+# The server reads blog/ inside this working directory.
+blog_directory="/srv/fieldnotes"
+blog_user="blog"
+blog_group="blog"
+
+# Keep this in sync with proxy_pass in the nginx site configuration.
+blog_port="8080"
+blog_log_directory="/var/log/blog-server"

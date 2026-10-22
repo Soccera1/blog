@@ -1,0 +1,35 @@
+#!/sbin/openrc-run
+
+name="Blog server"
+description="Serve Markdown posts from a local blog directory"
+
+supervisor="supervise-daemon"
+command="${blog_binary:-/usr/local/bin/blog-server}"
+command_args="${blog_port:-8080}"
+command_user="${blog_user:-blog}:${blog_group:-blog}"
+directory="${blog_directory:-/srv/fieldnotes}"
+pidfile="/run/${RC_SVCNAME}.pid"
+required_dirs="${directory}/blog"
+
+respawn_delay=2
+respawn_max=5
+respawn_period=60
+retry="TERM/5/KILL/5"
+
+blog_log_directory="${blog_log_directory:-/var/log/blog-server}"
+output_log="${blog_log_directory}/output.log"
+error_log="${blog_log_directory}/error.log"
+
+depend() {
+    need localmount
+    use net
+    after bootmisc
+    before nginx
+}
+
+start_pre() {
+    checkpath --directory --mode 0755 --owner root:root \
+        "${blog_log_directory}" || return 1
+    checkpath --file --mode 0640 --owner "${command_user}" \
+        "${output_log}" "${error_log}"
+}
