@@ -17,7 +17,7 @@ CFLAGS += -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 .PHONY: all clean test
 all: blog-server
 
-blog-server: main.c .build/style.inc .build/renderer-$(USE_PANDOC)
+blog-server: main.c .build/style.inc .build/copy.inc .build/renderer-$(USE_PANDOC)
 	$(CC) $(CPPFLAGS) $(RENDERER_CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ main.c $(LDLIBS)
 
 # Switching renderers must rebuild even when no source file has changed.
@@ -31,7 +31,11 @@ blog-server: main.c .build/style.inc .build/renderer-$(USE_PANDOC)
 	$(CC) -std=c11 -Wall -Wextra -Wpedantic -O2 -o $@ $<
 
 .build/style.inc: style.css .build/embed
-	.build/embed < style.css > $@.tmp
+	.build/embed stylesheet < style.css > $@.tmp
+	mv $@.tmp $@
+
+.build/copy.inc: copy.js .build/embed
+	.build/embed copy_script < copy.js > $@.tmp
 	mv $@.tmp $@
 
 test: blog-server

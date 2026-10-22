@@ -12,6 +12,7 @@ import unittest
 
 BINARY = Path(sys.argv.pop(1) if len(sys.argv) > 1 else './blog-server').resolve()
 SOURCE_CSS = (Path(__file__).resolve().parent.parent / 'style.css').read_bytes()
+SOURCE_JS = (Path(__file__).resolve().parent.parent / 'copy.js').read_bytes()
 USE_PANDOC = b'Markdown renderer: Pandoc' in subprocess.check_output([str(BINARY), '--help'])
 
 
@@ -233,8 +234,20 @@ class BlogTests(unittest.TestCase):
         self.assertEqual(css, SOURCE_CSS)
         self.assertIn(b'prefers-color-scheme: dark', css)
 
+    def test_embedded_copy_script_without_runtime_file(self):
+        self.assertFalse((self.root / 'copy.js').exists())
+        status, headers, script = self.get('/copy.js')
+        self.assertEqual(status, 200)
+        self.assertEqual(headers['Content-Type'], 'text/javascript; charset=utf-8')
+        self.assertEqual(script, SOURCE_JS)
+        status, headers, body = self.get('/posts/newer')
+        self.assertEqual(status, 200)
+        self.assertIn(b'<script src="/copy.js" defer></script>', body)
+        self.assertIn("script-src 'self'", headers['Content-Security-Policy'])
+        self.assertEqual(self.get('/posts/newer')[2], body)
+
     def test_head_errors_and_methods(self):
-        for path in ('/', '/posts/newer', '/style.css', '/missing', '/posts/private'):
+        for path in ('/', '/posts/newer', '/style.css', '/copy.js', '/missing', '/posts/private'):
             get_status, get_headers, _ = self.get(path)
             status, headers, body = self.get(path, 'HEAD')
             self.assertEqual(status, get_status)
@@ -357,7 +370,8 @@ class BlogTests(unittest.TestCase):
                      b'Definition text', b'Footnote text.', b'role="doc-noteref"',
                      b'class="sourceCode', b'class="st"', b'<math ', b'<msup>'):
             self.assertIn(text, body)
-        self.assertNotIn(b'<script', body)
+        self.assertNotIn(b'mathjax', body.lower())
+        self.assertNotIn(b'katex', body.lower())
 
     @unittest.skipUnless(USE_PANDOC, 'Pandoc build only')
     def test_pandoc_large_input_and_output(self):
