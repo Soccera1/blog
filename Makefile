@@ -1,5 +1,7 @@
 CC = cc
 PKG_CONFIG ?= pkg-config
+CPPFLAGS += $(shell $(PKG_CONFIG) --cflags libxxhash)
+LDLIBS += $(shell $(PKG_CONFIG) --libs libxxhash)
 USE_PANDOC ?= 0
 ifeq ($(USE_PANDOC),1)
 RENDERER_CPPFLAGS = -DUSE_PANDOC
