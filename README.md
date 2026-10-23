@@ -28,11 +28,19 @@ Run the executable from the directory containing your `blog/` folder. It reports
 an error if that directory is missing. Stop with Ctrl+C or SIGTERM.
 
 `style.css` and `copy.js` are the readable CSS and JavaScript sources. `make`
-converts them into embedded C arrays using a tiny C build helper. After changing
+minifies them with `tools/minify.c`, then embeds the results as C arrays.
+The generated assets are `.build/style.min.css` and `.build/copy.min.js`.
+This uses the C compiler already required by the project. After changing
 either file, rebuild and restart the server. The deployed executable needs no
 separate stylesheet, script, or template files;
 xxHash is a shared library dependency of both builds; MD4C is also needed at
 runtime with the default build. On Gentoo, xxHash is `dev-libs/xxhash`.
+
+The minifier removes comments and unnecessary whitespace, preserving strings,
+CSS selector spacing, and JavaScript line breaks that may affect automatic
+semicolon insertion. It leaves the remaining JavaScript unchanged when it
+encounters ambiguous slash expressions or template literals; it does not
+rename identifiers or rewrite expressions.
 
 ### Pandoc renderer (compile-time option)
 
@@ -271,3 +279,8 @@ traversal handling. Cache tests check invalidation with unchanged timestamps,
 metadata edits, draft transitions, deletion, and replacement. The Pandoc build
 also checks cache hits with a counted renderer, eviction, extended formatting,
 large conversions, subprocess failures, output limits, and conversion timeouts.
+
+`make test` also checks the C minifier's string, comment, selector, escape, and
+semicolon-insertion handling. If Node.js is available, it additionally compares
+JavaScript fixture behavior before and after minification; otherwise that
+optional check is skipped.

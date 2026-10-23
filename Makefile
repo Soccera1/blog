@@ -30,15 +30,28 @@ blog-server: main.c .build/style.inc .build/copy.inc .build/renderer-$(USE_PANDO
 	mkdir -p .build
 	$(CC) -std=c11 -Wall -Wextra -Wpedantic -O2 -o $@ $<
 
-.build/style.inc: style.css .build/embed
-	.build/embed stylesheet < style.css > $@.tmp
+.build/minify: tools/minify.c
+	mkdir -p .build
+	$(CC) -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -O2 -o $@ $<
+
+.build/style.min.css: style.css .build/minify
+	.build/minify --css < style.css > $@.tmp
 	mv $@.tmp $@
 
-.build/copy.inc: copy.js .build/embed
-	.build/embed copy_script < copy.js > $@.tmp
+.build/copy.min.js: copy.js .build/minify
+	.build/minify --js < copy.js > $@.tmp
+	mv $@.tmp $@
+
+.build/style.inc: .build/style.min.css .build/embed
+	.build/embed stylesheet < .build/style.min.css > $@.tmp
+	mv $@.tmp $@
+
+.build/copy.inc: .build/copy.min.js .build/embed
+	.build/embed copy_script < .build/copy.min.js > $@.tmp
 	mv $@.tmp $@
 
 test: blog-server
+	python3 tests/test_minify.py .build/minify
 	python3 tests/test_server.py ./blog-server
 
 clean:
