@@ -11,8 +11,11 @@ import unittest
 
 
 BINARY = Path(sys.argv.pop(1) if len(sys.argv) > 1 else './blog-server').resolve()
-SOURCE_CSS = (Path(__file__).resolve().parent.parent / 'style.css').read_bytes()
-SOURCE_JS = (Path(__file__).resolve().parent.parent / 'copy.js').read_bytes()
+PROJECT = Path(__file__).resolve().parent.parent
+SOURCE_CSS = (PROJECT / 'style.css').read_bytes()
+SOURCE_JS = (PROJECT / 'copy.js').read_bytes()
+MINIFIED_CSS = (PROJECT / '.build/style.min.css').read_bytes()
+MINIFIED_JS = (PROJECT / '.build/copy.min.js').read_bytes()
 USE_PANDOC = b'Markdown renderer: Pandoc' in subprocess.check_output([str(BINARY), '--help'])
 
 
@@ -231,15 +234,17 @@ class BlogTests(unittest.TestCase):
         status, headers, css = self.get('/style.css')
         self.assertEqual(status, 200)
         self.assertEqual(headers['Content-Type'], 'text/css; charset=utf-8')
-        self.assertEqual(css, SOURCE_CSS)
-        self.assertIn(b'prefers-color-scheme: dark', css)
+        self.assertEqual(css, MINIFIED_CSS)
+        self.assertLess(len(css), len(SOURCE_CSS))
+        self.assertRegex(css, rb'prefers-color-scheme:\s*dark')
 
     def test_embedded_copy_script_without_runtime_file(self):
         self.assertFalse((self.root / 'copy.js').exists())
         status, headers, script = self.get('/copy.js')
         self.assertEqual(status, 200)
         self.assertEqual(headers['Content-Type'], 'text/javascript; charset=utf-8')
-        self.assertEqual(script, SOURCE_JS)
+        self.assertEqual(script, MINIFIED_JS)
+        self.assertLess(len(script), len(SOURCE_JS))
         status, headers, body = self.get('/posts/newer')
         self.assertEqual(status, 200)
         self.assertIn(b'<script src="/copy.js" defer></script>', body)
